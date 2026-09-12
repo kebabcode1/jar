@@ -22,9 +22,12 @@ Designed to replace dated 1990s decompiler UIs with a contemporary Windows 11 de
   - `Segoe UI` typography with 28px row height, smooth selection pills, and file badges (`☕ .java`, `⚙ config`, `📋 manifest`, `🖼 image`).
 - **✏️ In-App Code Editor & Repackager**:
   - Direct live editing for `.java`, `.json`, `.xml`, `.properties`, `.txt`, and `MANIFEST.MF`.
-  - Full `Ctrl+Z` / `Ctrl+Y` undo/redo history, dirty state tracking (`● Unsaved changes`), and `Ctrl+S` file save.
+  - Full `Ctrl+Z` / `Ctrl+Y` undo/redo history, dirty state tracking (`● Modified`), and `Ctrl+S` file save.
   - **Auto-Recompilation**: Automatically invokes JDK `javac` to recompile modified sources with error reporting.
   - **"Save As JAR..." Button**: Prominently featured on the toolbar to export updated JAR archives with all classes and resources intact.
+- **✨ Two-Tier Anti-Obfuscation & Deobfuscator**:
+  - **In-Editor Instant Deobfuscator (`Ctrl+Alt+D`)**: Dedicated "Deobfuscate" button in the editor header instantly decodes unicode/hex escape strings (`\u0048...`), folds constant boolean/numeric predicates (`1 == 1`, `true && true`, `1 == 2`), and renames synthetic identifiers (`var0`, `var1`, `a`, `b`) to typed names (`str0`, `num1`, `flag2`). Fully undoable with `Ctrl+Z`.
+  - **Deep Anti-Obfuscation Re-Decompilation**: Toolbar dropdown "Deep Deobfuscate Project" or CLI `-d, --deobfuscate` activates aggressive deobfuscation flags in Vineflower (`--rename-members`, `--variable-renaming=jad`, `--synthetic-not-set`) and CFR (`--antiobf`, `--renamedupmembers`, `--renameillegalidents`, `--renamesmallmembers`).
 - **🔍 Syntax Highlighting & In-Viewer Search**:
   - VS Code / GitHub Light syntax highlighting palette.
   - Synchronized line numbers gutter.
@@ -53,6 +56,9 @@ Drag any `.jar` file directly onto `JarDecompiler.exe` in Windows File Explorer.
 ```powershell
 # Decompile to default directory:
 .\JarDecompiler.exe myapp.jar
+
+# Decompile with deep anti-obfuscation & identifier renaming:
+.\JarDecompiler.exe myapp.jar -d
 
 # Specify custom output folder and CFR engine:
 .\JarDecompiler.exe myapp.jar -o .\sources -e cfr

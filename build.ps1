@@ -18,8 +18,10 @@ if (-not (Test-Path $csc)) {
 }
 
 # Locate javac.exe and jar.exe
-$javac = (Get-Command javac.exe -ErrorAction SilentlyContinue)?.Source
-$jarExe = (Get-Command jar.exe -ErrorAction SilentlyContinue)?.Source
+$cmdJavac = Get-Command javac.exe -ErrorAction SilentlyContinue
+$javac = if ($cmdJavac) { $cmdJavac.Source } else { $null }
+$cmdJar = Get-Command jar.exe -ErrorAction SilentlyContinue
+$jarExe = if ($cmdJar) { $cmdJar.Source } else { $null }
 
 if (-not $javac -or -not $jarExe) {
     $knownJdks = @(

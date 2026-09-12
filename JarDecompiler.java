@@ -83,6 +83,7 @@ public class JarDecompiler {
         public String filterPattern = null;
         public boolean extractResources = true;
         public boolean openFolderWhenDone = false;
+        public boolean deobfuscate = false;
     }
 
     public static class DecompileResult {
@@ -139,6 +140,10 @@ public class JarDecompiler {
                     break;
                 case "--no-resources":
                     options.extractResources = false;
+                    break;
+                case "-d":
+                case "--deobfuscate":
+                    options.deobfuscate = true;
                     break;
                 case "--open":
                     options.openFolderWhenDone = true;
@@ -211,6 +216,7 @@ public class JarDecompiler {
               -f, --filter <PATTERN>     Regex filter for packages/classes to decompile
                                          (e.g., "com/example/.*" or "com.example.*").
               --no-resources             Do not extract non-class resource files.
+              -d, --deobfuscate          Enable deep anti-obfuscation & identifier renaming.
               --open                     Open output directory in file explorer when done.
               --gui                      Launch interactive GUI workbench.
               -v, --version              Show version information.
@@ -420,9 +426,43 @@ public class JarDecompiler {
                 command.add("--jarfilter");
                 command.add(options.filterPattern.replace(".", "\\."));
             }
+            if (options.deobfuscate) {
+                command.add("--antiobf");
+                command.add("true");
+                command.add("--obfattr");
+                command.add("true");
+                command.add("--obfcontrol");
+                command.add("true");
+                command.add("--rename");
+                command.add("true");
+                command.add("--renamedupmembers");
+                command.add("true");
+                command.add("--renameillegalidents");
+                command.add("true");
+                command.add("--renameenumidents");
+                command.add("true");
+                command.add("--renamesmallmembers");
+                command.add("3");
+                command.add("--removebadgenerics");
+                command.add("true");
+                command.add("--removedeadconditionals");
+                command.add("true");
+                command.add("--sugarasserts");
+                command.add("true");
+                command.add("--constobf");
+                command.add("true");
+            }
         } else {
             command.add("--pattern-matching=true");
             command.add("--thread-count=4");
+            if (options.deobfuscate) {
+                command.add("--rename-members=true");
+                command.add("--variable-renaming=jad");
+                command.add("--rename-parameters=true");
+                command.add("--synthetic-not-set=true");
+                command.add("--ternary-constant-simplification=true");
+                command.add("--prettify-ifs=true");
+            }
             command.add(options.jarPath.toAbsolutePath().toString());
             command.add(options.outputDir.toAbsolutePath().toString());
         }
@@ -859,6 +899,201 @@ public class JarDecompiler {
     }
 
     // =========================================================================
+    // Deobfuscation Service: Source Cleaner & Anti-Obfuscation Pipeline
+    // =========================================================================
+
+    public static class DeobfuscationService {
+
+        public static class DeobfuscateResult {
+            public final String transformedCode;
+            public final int unicodeCount;
+            public final int identifiersRenamed;
+            public final int predicatesFolded;
+            public final boolean modified;
+
+            public DeobfuscateResult(String transformedCode, int unicodeCount, int identifiersRenamed, int predicatesFolded) {
+                this.transformedCode = transformedCode;
+                this.unicodeCount = unicodeCount;
+                this.identifiersRenamed = identifiersRenamed;
+                this.predicatesFolded = predicatesFolded;
+                this.modified = (unicodeCount + identifiersRenamed + predicatesFolded) > 0;
+            }
+        }
+
+        public static DeobfuscateResult deobfuscateSource(String source) {
+            if (source == null || source.isEmpty()) {
+                return new DeobfuscateResult(source, 0, 0, 0);
+            }
+
+            int unicodeCount = 0;
+            int predicatesFolded = 0;
+            int identifiersRenamed = 0;
+
+            // 1. Decode Unicode escapes (\u0048\u0065\u006c\u006c\u006f)
+            StringBuilder sb = new StringBuilder();
+            Pattern unicodePattern = Pattern.compile("\\\\u([0-9a-fA-F]{4})");
+            Matcher m = unicodePattern.matcher(source);
+            while (m.find()) {
+                int codePoint = Integer.parseInt(m.group(1), 16);
+                String replacement;
+                if (codePoint == '"') {
+                    replacement = "\\\"";
+                } else if (codePoint == '\\') {
+                    replacement = "\\\\";
+                } else if (codePoint == '\n') {
+                    replacement = "\\n";
+                } else if (codePoint == '\r') {
+                    replacement = "\\r";
+                } else if (codePoint == '\t') {
+                    replacement = "\\t";
+                } else if (codePoint >= 32 && codePoint <= 126) {
+                    replacement = Character.toString((char) codePoint);
+                    unicodeCount++;
+                } else if (Character.isLetterOrDigit(codePoint)) {
+                    replacement = Character.toString((char) codePoint);
+                    unicodeCount++;
+                } else {
+                    replacement = m.group(0);
+                }
+                m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+            }
+            m.appendTail(sb);
+            String current = sb.toString();
+
+            // 2. Constant folding & opaque predicates
+            String[] foldingRules = {
+                "true\\s*&&\\s*true", "true",
+                "false\\s*\\|\\|\\s*false", "false",
+                "true\\s*\\|\\|\\s*false", "true",
+                "false\\s*\\|\\|\\s*true", "true",
+                "1\\s*==\\s*1", "true",
+                "0\\s*==\\s*0", "true",
+                "1\\s*==\\s*2", "false",
+                "0\\s*==\\s*1", "false",
+                "1\\s*!=\\s*1", "false",
+                "1\\s*!=\\s*2", "true",
+                "!false", "true",
+                "!true", "false",
+                "true\\s*\\?\\s*([^:?]+?)\\s*:\\s*([^:?;]+?)\\s*;", "$1;",
+                "false\\s*\\?\\s*([^:?]+?)\\s*:\\s*([^:?;]+?)\\s*;", "$2;"
+            };
+            for (int i = 0; i < foldingRules.length; i += 2) {
+                Pattern p = Pattern.compile(foldingRules[i]);
+                Matcher matcher = p.matcher(current);
+                int count = 0;
+                StringBuffer buffer = new StringBuffer();
+                while (matcher.find()) {
+                    matcher.appendReplacement(buffer, foldingRules[i + 1]);
+                    count++;
+                }
+                matcher.appendTail(buffer);
+                if (count > 0) {
+                    predicatesFolded += count;
+                    current = buffer.toString();
+                }
+            }
+
+            // Dead code annotation
+            Pattern deadIfPattern = Pattern.compile("if\\s*\\(\\s*false\\s*\\)");
+            Matcher deadIfMatcher = deadIfPattern.matcher(current);
+            if (deadIfMatcher.find()) {
+                current = deadIfMatcher.replaceAll("/* Dead branch */ if (false)");
+                predicatesFolded++;
+            }
+
+            // 3. Synthetic Identifier Beautification
+            Pattern declPattern = Pattern.compile("([A-Za-z0-9_$.<>\\[\\]]+)\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*(?:=|;|,|\\)|:)");
+            Matcher declMatcher = declPattern.matcher(current);
+            Map<String, String> renames = new LinkedHashMap<>();
+
+            while (declMatcher.find()) {
+                String rawType = declMatcher.group(1);
+                String varName = declMatcher.group(2);
+
+                if (rawType.equals("return") || rawType.equals("throw") || rawType.equals("package") ||
+                    rawType.equals("import") || rawType.equals("class") || rawType.equals("interface") ||
+                    rawType.equals("enum") || rawType.equals("record")) {
+                    continue;
+                }
+
+                boolean isSynthetic = varName.matches("^(var|p|param|arg|v|_)\\d+$") ||
+                                      (varName.length() == 1 && Character.isLowerCase(varName.charAt(0)));
+
+                if (isSynthetic && !renames.containsKey(varName)) {
+                    String prefix = getPrefixForType(rawType);
+                    String num = "";
+                    if (varName.startsWith("var")) {
+                        num = varName.substring(3);
+                    } else {
+                        num = String.valueOf(renames.size() + 1);
+                    }
+                    String candidate = prefix + num;
+                    int cNum = 1;
+                    while (current.contains(candidate) && !candidate.equals(varName)) {
+                        candidate = prefix + (cNum++);
+                    }
+                    renames.put(varName, candidate);
+                }
+            }
+
+            if (!renames.isEmpty()) {
+                for (Map.Entry<String, String> r : renames.entrySet()) {
+                    String oldName = r.getKey();
+                    String newName = r.getValue();
+                    Pattern wordPattern = Pattern.compile("\\b" + Pattern.quote(oldName) + "\\b");
+                    Matcher wordMatcher = wordPattern.matcher(current);
+                    if (wordMatcher.find()) {
+                        current = wordMatcher.replaceAll(newName);
+                        identifiersRenamed++;
+                    }
+                }
+            }
+
+            return new DeobfuscateResult(current, unicodeCount, identifiersRenamed, predicatesFolded);
+        }
+
+        private static String getPrefixForType(String rawType) {
+            if (rawType.contains("<")) {
+                rawType = rawType.substring(0, rawType.indexOf('<'));
+            }
+            if (rawType.contains(".")) {
+                rawType = rawType.substring(rawType.lastIndexOf('.') + 1);
+            }
+
+            switch (rawType) {
+                case "String": return "str";
+                case "int": return "num";
+                case "long": return "longVal";
+                case "boolean": return "flag";
+                case "double": return "dVal";
+                case "float": return "fVal";
+                case "byte[]": return "bytes";
+                case "byte": return "bVal";
+                case "char": return "ch";
+                case "File": return "file";
+                case "Path": return "path";
+                case "Exception": return "ex";
+                case "Throwable": return "err";
+                case "StringBuilder": return "sb";
+                case "List": return "list";
+                case "Map": return "map";
+                case "Set": return "set";
+                case "Consumer": return "consumer";
+                case "Supplier": return "supplier";
+                case "Function": return "func";
+                case "Predicate": return "predicate";
+                case "InputStream": return "inStream";
+                case "OutputStream": return "outStream";
+                default:
+                    if (rawType.length() > 0 && Character.isUpperCase(rawType.charAt(0))) {
+                        return Character.toLowerCase(rawType.charAt(0)) + rawType.substring(1);
+                    }
+                    return "obj";
+            }
+        }
+    }
+
+    // =========================================================================
     // GUI Workbench: Launch & Main Frame
     // =========================================================================
 
@@ -882,6 +1117,7 @@ public class JarDecompiler {
         private CodeViewerPanel codeViewerPanel;
         private JComboBox<Engine> cmbEngine;
         private JButton btnDecompile;
+        private JButton btnDeobfuscate;
         private JButton btnSaveAsJar;
         private JButton btnOpenExplorer;
         private JProgressBar progressBar;
@@ -967,13 +1203,46 @@ public class JarDecompiler {
             });
             leftControls.add(btnDecompile);
 
+            btnDeobfuscate = createStyledButton("Deobfuscate ▼", new Color(124, 58, 237), Color.WHITE);
+            btnDeobfuscate.setEnabled(false);
+            btnDeobfuscate.setToolTipText("Deobfuscate active code file or run deep anti-obfuscation decompiler");
+
+            JPopupMenu deobfMenu = new JPopupMenu();
+            JMenuItem itemCurrentFile = new JMenuItem("Deobfuscate Active File (Clean variables, fold constants, decode unicode)    Ctrl+Alt+D");
+            itemCurrentFile.setFont(FONT_UI);
+            itemCurrentFile.addActionListener(ev -> codeViewerPanel.deobfuscateActiveFile());
+
+            JMenuItem itemDeepProject = new JMenuItem("Deep Deobfuscate Project (Re-run Engine with Anti-Obfuscation flags)");
+            itemDeepProject.setFont(FONT_UI);
+            itemDeepProject.addActionListener(ev -> {
+                if (currentJarPath != null) {
+                    int confirm = JOptionPane.showConfirmDialog(
+                            this,
+                            "Deep deobfuscation will re-run " + currentEngine.displayName + "\nwith aggressive anti-obfuscation, identifier renaming, and flow cleaning flags.\n\nProceed?",
+                            "Deep Deobfuscate Project",
+                            JOptionPane.YES_NO_OPTION,
+                            JOptionPane.QUESTION_MESSAGE
+                    );
+                    if (confirm == JOptionPane.YES_OPTION) {
+                        loadAndDecompileJar(currentJarPath, true);
+                    }
+                }
+            });
+
+            deobfMenu.add(itemCurrentFile);
+            deobfMenu.addSeparator();
+            deobfMenu.add(itemDeepProject);
+
+            btnDeobfuscate.addActionListener(ev -> deobfMenu.show(btnDeobfuscate, 0, btnDeobfuscate.getHeight()));
+            leftControls.add(btnDeobfuscate);
+
             controlsBar.add(leftControls, BorderLayout.WEST);
 
             JPanel rightControls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
             rightControls.setOpaque(false);
 
             // Prominent "Save As JAR..." button
-            btnSaveAsJar = createStyledButton("💾 Save As JAR...", new Color(16, 124, 65), Color.WHITE);
+            btnSaveAsJar = createStyledButton("Save As JAR...", new Color(16, 124, 65), Color.WHITE);
             btnSaveAsJar.setEnabled(false);
             btnSaveAsJar.setToolTipText("Recompile modified sources and package into a new .jar file (Ctrl+Shift+S)");
             btnSaveAsJar.addActionListener(e -> saveAsJar());
@@ -993,7 +1262,7 @@ public class JarDecompiler {
             });
             rightControls.add(btnOpenExplorer);
 
-            JButton btnViewSource = createStyledButton("📜 App Source", new Color(241, 245, 249), new Color(30, 41, 59));
+            JButton btnViewSource = createStyledButton("App Source", new Color(241, 245, 249), new Color(30, 41, 59));
             btnViewSource.setToolTipText("View the C# .exe launcher & Java source code, or export to build yourself");
             btnViewSource.addActionListener(e -> showApplicationSourceDialog());
             rightControls.add(btnViewSource);
@@ -1048,6 +1317,16 @@ public class JarDecompiler {
                 }
             });
 
+            // Global Shortcut Ctrl+Alt+D for Deobfuscate File
+            root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(
+                    KeyStroke.getKeyStroke(KeyEvent.VK_D, InputEvent.CTRL_DOWN_MASK | InputEvent.ALT_DOWN_MASK), "deobfuscateCurrentFile");
+            root.getActionMap().put("deobfuscateCurrentFile", new AbstractAction() {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    if (codeViewerPanel != null) codeViewerPanel.deobfuscateActiveFile();
+                }
+            });
+
             setContentPane(root);
         }
 
@@ -1059,7 +1338,15 @@ public class JarDecompiler {
             codeViewerPanel.loadFile(filePath);
         }
 
+        public void setStatus(String text) {
+            lblStatus.setText(text);
+        }
+
         public void loadAndDecompileJar(Path jarPath) {
+            loadAndDecompileJar(jarPath, false);
+        }
+
+        public void loadAndDecompileJar(Path jarPath, boolean deobfuscate) {
             if (decompileWorker != null && !decompileWorker.isDone()) {
                 decompileWorker.cancel(true);
             }
@@ -1073,19 +1360,21 @@ public class JarDecompiler {
 
             dropZone.setLoadedFile(jarPath);
             btnDecompile.setEnabled(false);
+            btnDeobfuscate.setEnabled(false);
             btnSaveAsJar.setEnabled(false);
             btnOpenExplorer.setEnabled(false);
             progressBar.setIndeterminate(true);
-            lblStatus.setText("Decompiling " + fileName + " with " + currentEngine.name() + "...");
+            lblStatus.setText((deobfuscate ? "Decompiling & deobfuscating " : "Decompiling ") + fileName + " with " + currentEngine.displayName + "...");
             txtLogArea.setText("");
 
-            codeViewerPanel.showPlaceholder("Decompiling archive: " + fileName + "...\nPlease wait.");
+            codeViewerPanel.showPlaceholder("Decompiling archive" + (deobfuscate ? " (with Anti-Obfuscation)" : "") + ": " + fileName + "...\nPlease wait.");
 
             DecompileOptions options = new DecompileOptions();
             options.jarPath = jarPath;
             options.outputDir = currentOutputDir;
             options.engine = currentEngine;
             options.extractResources = true;
+            options.deobfuscate = deobfuscate;
 
             decompileWorker = new SwingWorker<>() {
                 @Override
@@ -1110,13 +1399,15 @@ public class JarDecompiler {
                     progressBar.setIndeterminate(false);
                     progressBar.setValue(100);
                     btnDecompile.setEnabled(true);
+                    btnDeobfuscate.setEnabled(true);
 
                     try {
                         DecompileResult result = get();
                         if (result.success) {
                             btnSaveAsJar.setEnabled(true);
                             btnOpenExplorer.setEnabled(true);
-                            lblStatus.setText("Decompiled " + result.classesCount + " classes & " + result.resourcesCount +
+                            lblStatus.setText((deobfuscate ? "Deep anti-obfuscation decompilation finished: " : "Decompiled ") +
+                                    result.classesCount + " classes & " + result.resourcesCount +
                                     " resources in " + (result.elapsedMs / 1000.0) + "s  |  Editable in viewer!");
 
                             fileTreePanel.loadDirectory(currentOutputDir, jarPath.getFileName().toString());
@@ -1813,6 +2104,7 @@ public class JarDecompiler {
         private final JLabel lblSearchCount = new JLabel("");
         private final JButton btnSaveFile;
         private final JButton btnSaveAsJar;
+        private final JButton btnDeobfuscate;
         private final JButton btnCopy;
         private final CardLayout centerCards = new CardLayout();
         private final JPanel centerPanel = new JPanel(centerCards);
@@ -1856,21 +2148,31 @@ public class JarDecompiler {
             JPanel fileActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
             fileActions.setOpaque(false);
 
-            btnSaveFile = WorkbenchFrame.createStyledButton("Save File (Ctrl+S)", new Color(241, 245, 249), new Color(30, 41, 59));
+            btnSaveFile = WorkbenchFrame.createStyledButton("Save File", new Color(241, 245, 249), new Color(30, 41, 59));
             btnSaveFile.setEnabled(false);
+            btnSaveFile.setToolTipText("Save current file to disk (Ctrl+S)");
             btnSaveFile.addActionListener(e -> saveCurrentFile());
 
-            btnSaveAsJar = WorkbenchFrame.createStyledButton("💾 Save As JAR...", new Color(16, 124, 65), Color.WHITE);
+            btnSaveAsJar = WorkbenchFrame.createStyledButton("Save As JAR...", new Color(16, 124, 65), Color.WHITE);
+            btnSaveAsJar.setToolTipText("Recompile modified sources and package into a new .jar file (Ctrl+Shift+S)");
             btnSaveAsJar.addActionListener(e -> workbenchFrame.saveAsJar());
 
+            btnDeobfuscate = WorkbenchFrame.createStyledButton("Deobfuscate", new Color(124, 58, 237), Color.WHITE);
+            btnDeobfuscate.setEnabled(false);
+            btnDeobfuscate.setToolTipText("Decode unicode escapes, fold constants, and clean synthetic variable names (Ctrl+Alt+D)");
+            btnDeobfuscate.addActionListener(e -> deobfuscateActiveFile());
+
             btnCopy = WorkbenchFrame.createStyledButton("Copy", new Color(248, 250, 252), new Color(30, 41, 59));
+            btnCopy.setToolTipText("Copy source code to clipboard");
             btnCopy.addActionListener(e -> copyCodeToClipboard());
 
-            JButton btnFindToggle = WorkbenchFrame.createStyledButton("Find (Ctrl+F)", new Color(248, 250, 252), new Color(30, 41, 59));
+            JButton btnFindToggle = WorkbenchFrame.createStyledButton("Find", new Color(248, 250, 252), new Color(30, 41, 59));
+            btnFindToggle.setToolTipText("Find text in file (Ctrl+F)");
             btnFindToggle.addActionListener(e -> toggleSearchBar());
 
             fileActions.add(btnFindToggle);
             fileActions.add(btnCopy);
+            fileActions.add(btnDeobfuscate);
             fileActions.add(btnSaveFile);
             fileActions.add(btnSaveAsJar);
 
@@ -1970,6 +2272,15 @@ public class JarDecompiler {
                 }
             });
 
+            // Ctrl+Alt+D shortcut for Deobfuscate
+            codeEditor.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_D, InputEvent.CTRL_DOWN_MASK | InputEvent.ALT_DOWN_MASK), "deobfuscateFile");
+            codeEditor.getActionMap().put("deobfuscateFile", new AbstractAction() {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    if (btnDeobfuscate.isEnabled()) deobfuscateActiveFile();
+                }
+            });
+
             // Track edits to flag dirty state
             codeEditor.getDocument().addDocumentListener(new DocumentListener() {
                 public void insertUpdate(DocumentEvent e) { checkDirty(); }
@@ -2003,7 +2314,7 @@ public class JarDecompiler {
                 isModified = dirty;
                 btnSaveFile.setEnabled(dirty);
                 if (dirty) {
-                    lblModifiedBadge.setText("● (Unsaved changes)");
+                    lblModifiedBadge.setText("● Modified");
                     btnSaveFile.setBackground(new Color(254, 243, 199)); // Soft amber highlight
                 } else {
                     lblModifiedBadge.setText("");
@@ -2052,6 +2363,7 @@ public class JarDecompiler {
             codeEditor.setText(text);
             codeEditor.setCaretPosition(0);
             codeEditor.setEditable(false);
+            btnDeobfuscate.setEnabled(false);
             isUpdatingDoc = false;
         }
 
@@ -2075,6 +2387,7 @@ public class JarDecompiler {
             codeEditor.setEditable(editable);
             btnSaveFile.setEnabled(false);
             btnSaveAsJar.setEnabled(false);
+            btnDeobfuscate.setEnabled(title.toLowerCase().endsWith(".java"));
             isUpdatingDoc = false;
             revalidate();
             repaint();
@@ -2105,6 +2418,7 @@ public class JarDecompiler {
                     lblImagePreview.setHorizontalTextPosition(SwingConstants.CENTER);
                     centerCards.show(centerPanel, "IMAGE");
                     codeEditor.setEditable(false);
+                    btnDeobfuscate.setEnabled(false);
                 } else {
                     centerCards.show(centerPanel, "CODE");
                     codeEditor.setEditable(true);
@@ -2122,6 +2436,7 @@ public class JarDecompiler {
                     originalContent = content;
                     isModified = false;
                     btnSaveFile.setEnabled(false);
+                    btnDeobfuscate.setEnabled(lower.endsWith(".java"));
                     isUpdatingDoc = false;
 
                     codeEditor.setCaretPosition(0);
@@ -2130,6 +2445,39 @@ public class JarDecompiler {
             } catch (Exception e) {
                 codeEditor.setText("Failed to load file contents: " + e.getMessage());
             }
+        }
+
+        public void deobfuscateActiveFile() {
+            if (currentPath == null) return;
+            String currentText = codeEditor.getText();
+            if (currentText.isBlank()) return;
+
+            DeobfuscationService.DeobfuscateResult result = DeobfuscationService.deobfuscateSource(currentText);
+            if (!result.modified) {
+                workbenchFrame.setStatus("No obfuscated patterns detected in " + currentPath.getFileName() + ".");
+                JOptionPane.showMessageDialog(this,
+                        "No obfuscated patterns (unicode escapes, opaque predicates, or synthetic variables)\nwere found in " + currentPath.getFileName() + ".",
+                        "Deobfuscation Info", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+
+            try {
+                StyledDocument doc = codeEditor.getStyledDocument();
+                doc.remove(0, doc.getLength());
+                doc.insertString(0, result.transformedCode, null);
+                if (currentPath.toString().toLowerCase().endsWith(".java")) {
+                    JavaSyntaxHighlighter.applyStyles(codeEditor, result.transformedCode);
+                }
+                codeEditor.setCaretPosition(0);
+            } catch (Exception ex) {
+                codeEditor.setText(result.transformedCode);
+            }
+
+            checkDirty();
+
+            String summary = String.format("✨ Deobfuscated %s: Decoded %d unicode escapes, cleaned %d identifiers, folded %d predicates. (Press Ctrl+Z to undo)",
+                    currentPath.getFileName(), result.unicodeCount, result.identifiersRenamed, result.predicatesFolded);
+            workbenchFrame.setStatus(summary);
         }
 
         private void runSearch() {
@@ -2306,48 +2654,66 @@ public class JarDecompiler {
             StyleConstants.setFontFamily(defaultStyle, "Consolas");
             StyleConstants.setFontSize(defaultStyle, 13);
 
-            Style keywordStyle = textPane.addStyle("keyword", defaultStyle);
-            StyleConstants.setForeground(keywordStyle, new Color(207, 34, 46));
-            StyleConstants.setBold(keywordStyle, true);
-
-            Style stringStyle = textPane.addStyle("string", defaultStyle);
-            StyleConstants.setForeground(stringStyle, new Color(10, 48, 105));
-
-            Style commentStyle = textPane.addStyle("comment", defaultStyle);
-            StyleConstants.setForeground(commentStyle, new Color(110, 119, 129));
-            StyleConstants.setItalic(commentStyle, true);
-
-            Style annotationStyle = textPane.addStyle("annotation", defaultStyle);
-            StyleConstants.setForeground(annotationStyle, new Color(130, 80, 223));
-
-            Style numberStyle = textPane.addStyle("number", defaultStyle);
-            StyleConstants.setForeground(numberStyle, new Color(5, 80, 174));
-
             try {
                 doc.remove(0, doc.getLength());
                 doc.insertString(0, text, defaultStyle);
-
-                Matcher matcher = TOKEN_PATTERN.matcher(text);
-                while (matcher.find()) {
-                    int start = matcher.start();
-                    int len = matcher.end() - start;
-
-                    if (matcher.group(1) != null || matcher.group(2) != null) {
-                        doc.setCharacterAttributes(start, len, commentStyle, true);
-                    } else if (matcher.group(3) != null || matcher.group(4) != null) {
-                        doc.setCharacterAttributes(start, len, stringStyle, true);
-                    } else if (matcher.group(5) != null) {
-                        doc.setCharacterAttributes(start, len, annotationStyle, true);
-                    } else if (matcher.group(6) != null) {
-                        String word = matcher.group(6);
-                        if (KEYWORDS.contains(word)) {
-                            doc.setCharacterAttributes(start, len, keywordStyle, true);
-                        }
-                    } else if (matcher.group(7) != null) {
-                        doc.setCharacterAttributes(start, len, numberStyle, true);
-                    }
-                }
+                applyStyles(textPane, text);
             } catch (BadLocationException ignored) {}
+        }
+
+        public static void applyStyles(JTextPane textPane, String text) {
+            StyledDocument doc = textPane.getStyledDocument();
+
+            Style defaultStyle = textPane.getStyle("default");
+            if (defaultStyle == null) {
+                defaultStyle = textPane.addStyle("default", null);
+                StyleConstants.setForeground(defaultStyle, new Color(36, 41, 47));
+                StyleConstants.setFontFamily(defaultStyle, "Consolas");
+                StyleConstants.setFontSize(defaultStyle, 13);
+            }
+
+            Style keywordStyle = textPane.getStyle("keyword");
+            if (keywordStyle == null) keywordStyle = textPane.addStyle("keyword", defaultStyle);
+            StyleConstants.setForeground(keywordStyle, new Color(207, 34, 46));
+            StyleConstants.setBold(keywordStyle, true);
+
+            Style stringStyle = textPane.getStyle("string");
+            if (stringStyle == null) stringStyle = textPane.addStyle("string", defaultStyle);
+            StyleConstants.setForeground(stringStyle, new Color(10, 48, 105));
+
+            Style commentStyle = textPane.getStyle("comment");
+            if (commentStyle == null) commentStyle = textPane.addStyle("comment", defaultStyle);
+            StyleConstants.setForeground(commentStyle, new Color(110, 119, 129));
+            StyleConstants.setItalic(commentStyle, true);
+
+            Style annotationStyle = textPane.getStyle("annotation");
+            if (annotationStyle == null) annotationStyle = textPane.addStyle("annotation", defaultStyle);
+            StyleConstants.setForeground(annotationStyle, new Color(130, 80, 223));
+
+            Style numberStyle = textPane.getStyle("number");
+            if (numberStyle == null) numberStyle = textPane.addStyle("number", defaultStyle);
+            StyleConstants.setForeground(numberStyle, new Color(5, 80, 174));
+
+            Matcher matcher = TOKEN_PATTERN.matcher(text);
+            while (matcher.find()) {
+                int start = matcher.start();
+                int len = matcher.end() - start;
+
+                if (matcher.group(1) != null || matcher.group(2) != null) {
+                    doc.setCharacterAttributes(start, len, commentStyle, true);
+                } else if (matcher.group(3) != null || matcher.group(4) != null) {
+                    doc.setCharacterAttributes(start, len, stringStyle, true);
+                } else if (matcher.group(5) != null) {
+                    doc.setCharacterAttributes(start, len, annotationStyle, true);
+                } else if (matcher.group(6) != null) {
+                    String word = matcher.group(6);
+                    if (KEYWORDS.contains(word)) {
+                        doc.setCharacterAttributes(start, len, keywordStyle, true);
+                    }
+                } else if (matcher.group(7) != null) {
+                    doc.setCharacterAttributes(start, len, numberStyle, true);
+                }
+            }
         }
     }
 }
