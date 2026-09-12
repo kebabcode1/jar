@@ -1,0 +1,32 @@
+# Build Outputs
+*.class
+*.exe
+*.jar
+!engines/*.jar
+!samples/*.jar
+bin/
+build/
+dist/
+target/
+out/
+decompiled_*/
+
+# IDE & Editor files
+.idea/
+*.iml
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Windows OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary / Scratch files
+*.tmp
+*.log
+manifest.txt

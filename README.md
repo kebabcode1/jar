@@ -1,2 +1,126 @@
-# jar
-A Jar decompiler. Useful for cracking .jar files, checking for maliciousness, and overall safety.
+# JAR Decompiler & Code Workbench
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Java](https://img.shields.io/badge/Java-17%2B-orange.svg)](https://www.oracle.com/java/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6.svg)](https://microsoft.com/windows)
+[![Single-File](https://img.shields.io/badge/Executable-Single--File%20(3.7%20MB)-brightgreen.svg)](JarDecompiler.exe)
+
+A modern, high-accuracy Java archive decompiler, code workbench, and in-app JAR editor for Windows 10 and 11. 
+
+Designed to replace dated 1990s decompiler UIs with a contemporary Windows 11 design language, native common dialogs, live syntax-highlighted code editing, automatic `javac` recompilation, and 1-click **"Save As JAR..."** export.
+
+---
+
+## ✨ Features
+
+- **🚀 100% Single-File Portable Executable (`JarDecompiler.exe`)**:
+  - The standalone `.exe` is only **~3.7 MB** and embeds the application bytecode and both decompiler engines.
+  - Zero setup: share just `JarDecompiler.exe` with anyone. It auto-unpacks runtime payloads to `%LOCALAPPDATA%\JarDecompiler` if needed.
+- **🗔 Native Windows 11 Dialogs**:
+  - Replaced legacy Win32 file choosers with true modern COM `IFileOpenDialog` and `SaveFileDialog` (Quick access, OneDrive, modern search, and breadcrumbs).
+- **📂 Modern Package & File Tree Explorer**:
+  - `Segoe UI` typography with 28px row height, smooth selection pills, and file badges (`☕ .java`, `⚙ config`, `📋 manifest`, `🖼 image`).
+- **✏️ In-App Code Editor & Repackager**:
+  - Direct live editing for `.java`, `.json`, `.xml`, `.properties`, `.txt`, and `MANIFEST.MF`.
+  - Full `Ctrl+Z` / `Ctrl+Y` undo/redo history, dirty state tracking (`● Unsaved changes`), and `Ctrl+S` file save.
+  - **Auto-Recompilation**: Automatically invokes JDK `javac` to recompile modified sources with error reporting.
+  - **"Save As JAR..." Button**: Prominently featured on the toolbar to export updated JAR archives with all classes and resources intact.
+- **🔍 Syntax Highlighting & In-Viewer Search**:
+  - VS Code / GitHub Light syntax highlighting palette.
+  - Synchronized line numbers gutter.
+  - Built-in `Ctrl+F` search bar with live match counter and Next / Previous navigation.
+- **⚙️ Dual Decompiler Engines**:
+  - **Vineflower** (Recommended - IntelliJ IDEA engine with modern Java 21+ pattern matching support).
+  - **CFR** (High-compatibility engine for edge-case obfuscation).
+  - Optional `javap` disassembly mode.
+- **🖱️ Drag & Drop Fluent Drop Zone**:
+  - Drag `.jar`, `.war`, or `.zip` files directly into the window or onto `JarDecompiler.exe` in Windows File Explorer.
+
+---
+
+## 🚀 Quick Start
+
+### Run the Standalone Executable
+Double-click `JarDecompiler.exe` or run:
+```powershell
+.\JarDecompiler.exe
+```
+
+### Drag & Drop
+Drag any `.jar` file directly onto `JarDecompiler.exe` in Windows File Explorer.
+
+### Command Line Interface (CLI)
+```powershell
+# Decompile to default directory:
+.\JarDecompiler.exe myapp.jar
+
+# Specify custom output folder and CFR engine:
+.\JarDecompiler.exe myapp.jar -o .\sources -e cfr
+
+# Open output directory in Windows File Explorer when complete:
+.\JarDecompiler.exe myapp.jar --open
+```
+
+---
+
+## 🛠️ How to Build from Source
+
+### Prerequisites
+1. **JDK 17 or higher** (JDK 17, 21, or 24 recommended).
+2. **Windows 10 / 11** (uses the built-in Microsoft .NET Framework `csc.exe` compiler).
+
+### 1-Click Build (Command Prompt / PowerShell)
+Run the build script:
+```cmd
+build.bat
+```
+Or via PowerShell:
+```powershell
+.\build.ps1
+```
+
+The script will:
+1. Compile `src/JarDecompiler.java` into bytecode.
+2. Package `build/JarDecompiler.jar`.
+3. Compile `launcher/Launcher.cs` into `JarDecompiler.exe` with all JARs and icons embedded.
+
+---
+
+## 📁 Repository Structure
+
+```text
+├── src/
+│   └── JarDecompiler.java         # Main Java application (Workbench GUI, Editor, Decompile Engine, RecompileService)
+├── launcher/
+│   ├── Launcher.cs                # Native C# launcher (Win11 dialogs, embedded resource loader, CLI console attach)
+│   └── app.ico                    # Windows application icon
+├── engines/
+│   ├── vineflower-1.12.0.jar      # Bundled Vineflower engine
+│   └── cfr-0.152.jar              # Bundled CFR engine
+├── samples/
+│   ├── test-app.jar               # Sample test application
+│   ├── crackme.jar                # Level 1 CrackMe challenge
+│   └── crackme_harder.jar         # Level 2 Multi-Gate CrackMe challenge
+├── build.bat                      # 1-Click Windows batch build script
+├── build.ps1                      # PowerShell build script
+├── .gitignore                     # Standard Git ignore rules
+├── LICENSE                        # MIT License
+└── README.md                      # Documentation
+```
+
+---
+
+## 🎯 Included Sample Challenges
+
+The `samples/` folder includes test archives for benchmarking and verifying the editor workflow:
+
+- **`test-app.jar`**: Contains Java 21+ records, enums, switch expressions, and config resources.
+- **`crackme.jar` (Level 1)**: Locked login vault with an impossible timestamp check. Open in `JarDecompiler.exe`, set `SecurityManager.authenticate` to return `true`, click **"Save As JAR..."**, and unlock the vault!
+- **`crackme_harder.jar` (Level 2)**: Military-grade Citadel terminal featuring a 3-gate security pipeline (`DongleVerifier`, `QuantumEnclave`, `IntegrityGuard`) and real-time diagnostic stream.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+Decompiler engines (`vineflower` and `cfr`) are subject to their respective open-source licenses.
