@@ -82,7 +82,31 @@ Or via PowerShell:
 The script will:
 1. Compile `src/JarDecompiler.java` into bytecode.
 2. Package `build/JarDecompiler.jar`.
-3. Compile `launcher/Launcher.cs` into `JarDecompiler.exe` with all JARs and icons embedded.
+3. Compile `launcher/Launcher.cs` into `JarDecompiler.exe` with all JARs, source files, and icons embedded.
+
+---
+
+## 🔍 How to Inspect & Build the .EXE Alone
+
+The native Windows executable source is completely open in [`launcher/Launcher.cs`](launcher/Launcher.cs).
+
+### View the .EXE Source Code:
+- **In the Repository**: View [`launcher/Launcher.cs`](launcher/Launcher.cs).
+- **In the GUI Workbench**: Click the **"📜 App Source"** button on the top toolbar to view `Launcher.cs` directly with syntax highlighting!
+- **From Command Line**: Run `.\JarDecompiler.exe --source` to export the full source code from any standalone executable copy.
+
+### Build Only `JarDecompiler.exe`:
+- **Method 1 (Built-in Windows Compiler - 0 Installs Needed)**:
+  ```cmd
+  cd launcher
+  build_launcher.bat
+  ```
+- **Method 2 (.NET SDK / CLI)**:
+  ```powershell
+  dotnet build launcher/Launcher.csproj -c Release
+  ```
+- **Method 3 (Visual Studio)**:
+  Open `launcher/Launcher.csproj` in Visual Studio and build.
 
 ---
 
@@ -93,7 +117,10 @@ The script will:
 │   └── JarDecompiler.java         # Main Java application (Workbench GUI, Editor, Decompile Engine, RecompileService)
 ├── launcher/
 │   ├── Launcher.cs                # Native C# launcher (Win11 dialogs, embedded resource loader, CLI console attach)
-│   └── app.ico                    # Windows application icon
+│   ├── Launcher.csproj            # Visual Studio and dotnet build project file
+│   ├── build_launcher.bat         # 1-Click C# build script (uses built-in csc.exe)
+│   ├── app.ico                    # Windows application icon
+│   └── README.md                  # Launcher documentation & build guide
 ├── engines/
 │   ├── vineflower-1.12.0.jar      # Bundled Vineflower engine
 │   └── cfr-0.152.jar              # Bundled CFR engine

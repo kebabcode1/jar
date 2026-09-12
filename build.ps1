@@ -49,7 +49,9 @@ Write-Host "[2/4] Compiling Java workbench..." -ForegroundColor Yellow
 & $javac -encoding UTF-8 -d "build\classes" "src\JarDecompiler.java"
 if ($LASTEXITCODE -ne 0) { throw "Java compilation failed." }
 
-Write-Host "[3/4] Packaging JarDecompiler.jar..." -ForegroundColor Yellow
+Write-Host "[3/4] Packaging JarDecompiler.jar (with embedded sources)..." -ForegroundColor Yellow
+Copy-Item "launcher\Launcher.cs" -Destination "build\classes\"
+Copy-Item "src\JarDecompiler.java" -Destination "build\classes\"
 & $jarExe -cvfe "build\JarDecompiler.jar" JarDecompiler -C "build\classes" . | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "JAR packaging failed." }
 
@@ -63,6 +65,8 @@ $cscArgs = @(
     "/resource:build\JarDecompiler.jar,JarDecompiler.jar",
     "/resource:engines\vineflower-1.12.0.jar,vineflower-1.12.0.jar",
     "/resource:engines\cfr-0.152.jar,cfr-0.152.jar",
+    "/resource:launcher\Launcher.cs,Launcher.cs",
+    "/resource:src\JarDecompiler.java,JarDecompiler.java",
     "/out:dist\JarDecompiler.exe",
     "launcher\Launcher.cs"
 )

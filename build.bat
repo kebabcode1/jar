@@ -44,7 +44,9 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [3/4] Packaging JarDecompiler.jar...
+echo [3/4] Packaging JarDecompiler.jar (with embedded sources)...
+copy "launcher\Launcher.cs" "build\classes\" >nul
+copy "src\JarDecompiler.java" "build\classes\" >nul
 jar -cvfe "build\JarDecompiler.jar" JarDecompiler -C "build\classes" . >nul
 if %errorlevel% neq 0 (
     echo [ERROR] JAR packaging failed.
@@ -52,7 +54,7 @@ if %errorlevel% neq 0 (
 )
 
 echo [4/4] Building standalone executable (JarDecompiler.exe)...
-"%CSC_PATH%" /target:winexe /optimize+ /r:System.Windows.Forms.dll /r:System.Drawing.dll /win32icon:"launcher\app.ico" /resource:"build\JarDecompiler.jar",JarDecompiler.jar /resource:"engines\vineflower-1.12.0.jar",vineflower-1.12.0.jar /resource:"engines\cfr-0.152.jar",cfr-0.152.jar /out:"dist\JarDecompiler.exe" "launcher\Launcher.cs"
+"%CSC_PATH%" /target:winexe /optimize+ /r:System.Windows.Forms.dll /r:System.Drawing.dll /win32icon:"launcher\app.ico" /resource:"build\JarDecompiler.jar",JarDecompiler.jar /resource:"engines\vineflower-1.12.0.jar",vineflower-1.12.0.jar /resource:"engines\cfr-0.152.jar",cfr-0.152.jar /resource:"launcher\Launcher.cs",Launcher.cs /resource:"src\JarDecompiler.java",JarDecompiler.java /out:"dist\JarDecompiler.exe" "launcher\Launcher.cs"
 if %errorlevel% neq 0 (
     echo [ERROR] C# executable build failed.
     exit /b 1
