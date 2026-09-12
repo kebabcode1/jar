@@ -39,7 +39,7 @@ import javax.swing.undo.UndoManager;
  */
 public class JarDecompiler {
 
-    public static final String VERSION = "1.4.0";
+    public static final String VERSION = "1.5.0";
     public static final String VINEFLOWER_VERSION = "1.12.0";
     public static final String CFR_VERSION = "0.152";
 
@@ -314,6 +314,11 @@ public class JarDecompiler {
                         return res;
                     }
                     res.classesCount = countGeneratedJavaFiles(options.outputDir);
+                    if (options.deobfuscate) {
+                        logger.accept("Post-processing project files with source deobfuscator (cleaning non-ASCII names, beautifying synthetic variables, decoding unicode)...");
+                        int deobfCount = postProcessDeobfuscateDirectory(options.outputDir, logger);
+                        logger.accept("Deobfuscated and cleaned " + deobfCount + " source files.");
+                    }
                     res.success = true;
                 }
             }
@@ -568,6 +573,27 @@ public class JarDecompiler {
             count = (int) stream.filter(p -> Files.isRegularFile(p) && p.toString().endsWith(".java")).count();
         } catch (Exception ignored) {}
         return count;
+    }
+
+    private static int postProcessDeobfuscateDirectory(Path dir, java.util.function.Consumer<String> logger) {
+        if (!Files.isDirectory(dir)) return 0;
+        int[] count = new int[]{0};
+        try (var stream = Files.walk(dir)) {
+            stream.filter(p -> Files.isRegularFile(p) && p.toString().endsWith(".java"))
+                  .forEach(p -> {
+                      try {
+                          String content = Files.readString(p, StandardCharsets.UTF_8);
+                          DeobfuscationService.DeobfuscateResult result = DeobfuscationService.deobfuscateSource(content);
+                          if (result.modified) {
+                              Files.writeString(p, result.transformedCode, StandardCharsets.UTF_8);
+                              count[0]++;
+                          }
+                      } catch (Exception ignored) {}
+                  });
+        } catch (Exception e) {
+            if (logger != null) logger.accept("Post-processing notice: " + e.getMessage());
+        }
+        return count[0];
     }
 
     private static String getJavaExecutablePath() {
@@ -909,25 +935,28 @@ public class JarDecompiler {
             public final int unicodeCount;
             public final int identifiersRenamed;
             public final int predicatesFolded;
+            public final int nonAsciiCleaned;
             public final boolean modified;
 
-            public DeobfuscateResult(String transformedCode, int unicodeCount, int identifiersRenamed, int predicatesFolded) {
+            public DeobfuscateResult(String transformedCode, int unicodeCount, int identifiersRenamed, int predicatesFolded, int nonAsciiCleaned) {
                 this.transformedCode = transformedCode;
                 this.unicodeCount = unicodeCount;
                 this.identifiersRenamed = identifiersRenamed;
                 this.predicatesFolded = predicatesFolded;
-                this.modified = (unicodeCount + identifiersRenamed + predicatesFolded) > 0;
+                this.nonAsciiCleaned = nonAsciiCleaned;
+                this.modified = (unicodeCount + identifiersRenamed + predicatesFolded + nonAsciiCleaned) > 0;
             }
         }
 
         public static DeobfuscateResult deobfuscateSource(String source) {
             if (source == null || source.isEmpty()) {
-                return new DeobfuscateResult(source, 0, 0, 0);
+                return new DeobfuscateResult(source, 0, 0, 0, 0);
             }
 
             int unicodeCount = 0;
             int predicatesFolded = 0;
             int identifiersRenamed = 0;
+            int nonAsciiCleaned = 0;
 
             // 1. Decode Unicode escapes (\u0048\u0065\u006c\u006c\u006f)
             StringBuilder sb = new StringBuilder();
@@ -960,7 +989,46 @@ public class JarDecompiler {
             m.appendTail(sb);
             String current = sb.toString();
 
-            // 2. Constant folding & opaque predicates
+            // 2. Non-ASCII / CJK / Cyrillic Obfuscation Sanitizer
+            // Clean non-ASCII in package statements (e.g. package 袚嫮.鸏瀱.汉餑; -> package pkg_1.pkg_2.pkg_3;)
+            Pattern pkgPattern = Pattern.compile("(package\\s+)([^;]+)(;)");
+            Matcher pkgMatcher = pkgPattern.matcher(current);
+            if (pkgMatcher.find()) {
+                String fullPkg = pkgMatcher.group(2).trim();
+                if (hasNonAscii(fullPkg)) {
+                    String[] parts = fullPkg.split("\\.");
+                    StringBuilder newPkg = new StringBuilder();
+                    for (int i = 0; i < parts.length; i++) {
+                        if (i > 0) newPkg.append(".");
+                        if (hasNonAscii(parts[i])) {
+                            newPkg.append("pkg_").append(i + 1);
+                        } else {
+                            newPkg.append(parts[i]);
+                        }
+                    }
+                    current = current.replace(fullPkg, newPkg.toString());
+                    nonAsciiCleaned++;
+                }
+            }
+
+            // Clean any remaining non-ASCII tokens (Chinese, Cyrillic, symbols)
+            Pattern nonAsciiWordPattern = Pattern.compile("[^\\s;.,(){\\}\\[\\]<>\"'/+=*&|!~?:-]*[^\\x00-\\x7F]+[^\\s;.,(){\\}\\[\\]<>\"'/+=*&|!~?:-]*");
+            Matcher nonAsciiMatcher = nonAsciiWordPattern.matcher(current);
+            Map<String, String> nonAsciiRenames = new LinkedHashMap<>();
+            int obfIdx = 1;
+            while (nonAsciiMatcher.find()) {
+                String word = nonAsciiMatcher.group();
+                if (!nonAsciiRenames.containsKey(word)) {
+                    String replacementName = "ObfClass_" + (obfIdx++);
+                    nonAsciiRenames.put(word, replacementName);
+                }
+            }
+            for (Map.Entry<String, String> entry : nonAsciiRenames.entrySet()) {
+                current = current.replace(entry.getKey(), entry.getValue());
+                nonAsciiCleaned++;
+            }
+
+            // 3. Constant folding & opaque predicates
             String[] foldingRules = {
                 "true\\s*&&\\s*true", "true",
                 "false\\s*\\|\\|\\s*false", "false",
@@ -1001,7 +1069,7 @@ public class JarDecompiler {
                 predicatesFolded++;
             }
 
-            // 3. Synthetic Identifier Beautification
+            // 4. Synthetic Identifier Beautification (e.g. d0, d1, d2, f, f1, i0, var1)
             Pattern declPattern = Pattern.compile("([A-Za-z0-9_$.<>\\[\\]]+)\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*(?:=|;|,|\\)|:)");
             Matcher declMatcher = declPattern.matcher(current);
             Map<String, String> renames = new LinkedHashMap<>();
@@ -1017,19 +1085,20 @@ public class JarDecompiler {
                 }
 
                 boolean isSynthetic = varName.matches("^(var|p|param|arg|v|_)\\d+$") ||
-                                      (varName.length() == 1 && Character.isLowerCase(varName.charAt(0)));
+                                      (varName.length() == 1 && Character.isLowerCase(varName.charAt(0))) ||
+                                      varName.matches("^[a-z]\\d+$");
 
                 if (isSynthetic && !renames.containsKey(varName)) {
                     String prefix = getPrefixForType(rawType);
                     String num = "";
-                    if (varName.startsWith("var")) {
-                        num = varName.substring(3);
+                    if (varName.matches(".*\\d+$")) {
+                        num = varName.replaceAll("^\\D+", "");
                     } else {
                         num = String.valueOf(renames.size() + 1);
                     }
                     String candidate = prefix + num;
                     int cNum = 1;
-                    while (current.contains(candidate) && !candidate.equals(varName)) {
+                    while ((current.contains(candidate) || renames.containsValue(candidate)) && !candidate.equals(varName)) {
                         candidate = prefix + (cNum++);
                     }
                     renames.put(varName, candidate);
@@ -1049,7 +1118,15 @@ public class JarDecompiler {
                 }
             }
 
-            return new DeobfuscateResult(current, unicodeCount, identifiersRenamed, predicatesFolded);
+            return new DeobfuscateResult(current, unicodeCount, identifiersRenamed, predicatesFolded, nonAsciiCleaned);
+        }
+
+        private static boolean hasNonAscii(String str) {
+            if (str == null) return false;
+            for (int i = 0; i < str.length(); i++) {
+                if (str.charAt(i) > 127) return true;
+            }
+            return false;
         }
 
         private static String getPrefixForType(String rawType) {
@@ -1195,7 +1272,7 @@ public class JarDecompiler {
             cmbEngine.addActionListener(e -> currentEngine = (Engine) cmbEngine.getSelectedItem());
             leftControls.add(cmbEngine);
 
-            btnDecompile = createStyledButton("Re-Decompile", new Color(0, 120, 212), Color.WHITE);
+            btnDecompile = createStyledButton("Re-Decompile", new Color(0, 120, 212), new Color(15, 23, 42));
             btnDecompile.setEnabled(false);
             btnDecompile.setToolTipText("Re-run decompilation using the selected engine");
             btnDecompile.addActionListener(e -> {
@@ -1203,7 +1280,7 @@ public class JarDecompiler {
             });
             leftControls.add(btnDecompile);
 
-            btnDeobfuscate = createStyledButton("Deobfuscate ▼", new Color(124, 58, 237), Color.WHITE);
+            btnDeobfuscate = createStyledButton("Deobfuscate ▼", new Color(124, 58, 237), new Color(15, 23, 42));
             btnDeobfuscate.setEnabled(false);
             btnDeobfuscate.setToolTipText("Deobfuscate active code file or run deep anti-obfuscation decompiler");
 
@@ -1242,27 +1319,27 @@ public class JarDecompiler {
             rightControls.setOpaque(false);
 
             // Prominent "Save As JAR..." button
-            btnSaveAsJar = createStyledButton("Save As JAR...", new Color(16, 124, 65), Color.WHITE);
+            btnSaveAsJar = createStyledButton("Save As JAR...", new Color(16, 124, 65), new Color(15, 23, 42));
             btnSaveAsJar.setEnabled(false);
             btnSaveAsJar.setToolTipText("Recompile modified sources and package into a new .jar file (Ctrl+Shift+S)");
             btnSaveAsJar.addActionListener(e -> saveAsJar());
             rightControls.add(btnSaveAsJar);
 
-            JButton btnShowLog = createStyledButton("Console Log", new Color(241, 245, 249), new Color(30, 41, 59));
+            JButton btnShowLog = createStyledButton("Console Log", new Color(203, 213, 225), new Color(15, 23, 42));
             btnShowLog.addActionListener(e -> {
                 logDialog.setLocationRelativeTo(this);
                 logDialog.setVisible(true);
             });
             rightControls.add(btnShowLog);
 
-            btnOpenExplorer = createStyledButton("Open in Explorer", new Color(241, 245, 249), new Color(30, 41, 59));
+            btnOpenExplorer = createStyledButton("Open in Explorer", new Color(203, 213, 225), new Color(15, 23, 42));
             btnOpenExplorer.setEnabled(false);
             btnOpenExplorer.addActionListener(e -> {
                 if (currentOutputDir != null) openExplorer(currentOutputDir);
             });
             rightControls.add(btnOpenExplorer);
 
-            JButton btnViewSource = createStyledButton("App Source", new Color(241, 245, 249), new Color(30, 41, 59));
+            JButton btnViewSource = createStyledButton("App Source", new Color(203, 213, 225), new Color(15, 23, 42));
             btnViewSource.setToolTipText("View the C# .exe launcher & Java source code, or export to build yourself");
             btnViewSource.addActionListener(e -> showApplicationSourceDialog());
             rightControls.add(btnViewSource);
@@ -1662,16 +1739,42 @@ public class JarDecompiler {
             }
         }
 
-        public static JButton createStyledButton(String text, Color bg, Color fg) {
-            JButton btn = new JButton(text);
+        public static JButton createStyledButton(String text, Color borderAccent, Color fg) {
+            JButton btn = new JButton(text) {
+                @Override
+                protected void paintComponent(Graphics g) {
+                    Graphics2D g2 = (Graphics2D) g.create();
+                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                    g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+                    Color bg = Color.WHITE;
+                    if (!isEnabled()) {
+                        bg = new Color(248, 250, 252);
+                    } else if (getModel().isPressed()) {
+                        bg = new Color(226, 232, 240);
+                    } else if (getModel().isRollover()) {
+                        bg = new Color(241, 245, 249);
+                    }
+
+                    g2.setColor(bg);
+                    g2.fillRoundRect(1, 1, getWidth() - 2, getHeight() - 2, 8, 8);
+
+                    Color border = (borderAccent != null && isEnabled()) ? borderAccent : new Color(203, 213, 225);
+                    g2.setColor(border);
+                    g2.setStroke(new BasicStroke(1.5f));
+                    g2.drawRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 8, 8);
+
+                    g2.dispose();
+                    super.paintComponent(g);
+                }
+            };
+            btn.setContentAreaFilled(false);
+            btn.setOpaque(false);
             btn.setFont(FONT_UI_BOLD);
-            btn.setBackground(bg);
-            btn.setForeground(fg);
+            // Black text color (#0F172A) guarantees clear readability on white background
+            btn.setForeground(new Color(15, 23, 42));
             btn.setFocusPainted(false);
-            btn.setBorder(BorderFactory.createCompoundBorder(
-                    BorderFactory.createLineBorder(new Color(203, 213, 225), 1, true),
-                    new EmptyBorder(6, 14, 6, 14)
-            ));
+            btn.setBorder(new EmptyBorder(6, 14, 6, 14));
             btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
             return btn;
         }
@@ -2148,25 +2251,25 @@ public class JarDecompiler {
             JPanel fileActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
             fileActions.setOpaque(false);
 
-            btnSaveFile = WorkbenchFrame.createStyledButton("Save File", new Color(241, 245, 249), new Color(30, 41, 59));
+            btnSaveFile = WorkbenchFrame.createStyledButton("Save File", new Color(203, 213, 225), new Color(15, 23, 42));
             btnSaveFile.setEnabled(false);
             btnSaveFile.setToolTipText("Save current file to disk (Ctrl+S)");
             btnSaveFile.addActionListener(e -> saveCurrentFile());
 
-            btnSaveAsJar = WorkbenchFrame.createStyledButton("Save As JAR...", new Color(16, 124, 65), Color.WHITE);
+            btnSaveAsJar = WorkbenchFrame.createStyledButton("Save As JAR...", new Color(16, 124, 65), new Color(15, 23, 42));
             btnSaveAsJar.setToolTipText("Recompile modified sources and package into a new .jar file (Ctrl+Shift+S)");
             btnSaveAsJar.addActionListener(e -> workbenchFrame.saveAsJar());
 
-            btnDeobfuscate = WorkbenchFrame.createStyledButton("Deobfuscate", new Color(124, 58, 237), Color.WHITE);
+            btnDeobfuscate = WorkbenchFrame.createStyledButton("Deobfuscate", new Color(124, 58, 237), new Color(15, 23, 42));
             btnDeobfuscate.setEnabled(false);
             btnDeobfuscate.setToolTipText("Decode unicode escapes, fold constants, and clean synthetic variable names (Ctrl+Alt+D)");
             btnDeobfuscate.addActionListener(e -> deobfuscateActiveFile());
 
-            btnCopy = WorkbenchFrame.createStyledButton("Copy", new Color(248, 250, 252), new Color(30, 41, 59));
+            btnCopy = WorkbenchFrame.createStyledButton("Copy", new Color(203, 213, 225), new Color(15, 23, 42));
             btnCopy.setToolTipText("Copy source code to clipboard");
             btnCopy.addActionListener(e -> copyCodeToClipboard());
 
-            JButton btnFindToggle = WorkbenchFrame.createStyledButton("Find", new Color(248, 250, 252), new Color(30, 41, 59));
+            JButton btnFindToggle = WorkbenchFrame.createStyledButton("Find", new Color(203, 213, 225), new Color(15, 23, 42));
             btnFindToggle.setToolTipText("Find text in file (Ctrl+F)");
             btnFindToggle.addActionListener(e -> toggleSearchBar());
 
@@ -2198,13 +2301,13 @@ public class JarDecompiler {
             ));
             searchBar.add(txtSearch);
 
-            JButton btnFindNext = WorkbenchFrame.createStyledButton("Next", new Color(248, 250, 252), new Color(30, 41, 59));
+            JButton btnFindNext = WorkbenchFrame.createStyledButton("Next", new Color(203, 213, 225), new Color(15, 23, 42));
             btnFindNext.addActionListener(e -> findNextMatch(true));
 
-            JButton btnFindPrev = WorkbenchFrame.createStyledButton("Previous", new Color(248, 250, 252), new Color(30, 41, 59));
+            JButton btnFindPrev = WorkbenchFrame.createStyledButton("Previous", new Color(203, 213, 225), new Color(15, 23, 42));
             btnFindPrev.addActionListener(e -> findNextMatch(false));
 
-            JButton btnCloseSearch = WorkbenchFrame.createStyledButton("✕", new Color(248, 250, 252), new Color(100, 116, 139));
+            JButton btnCloseSearch = WorkbenchFrame.createStyledButton("✕", new Color(203, 213, 225), new Color(15, 23, 42));
             btnCloseSearch.addActionListener(e -> searchBar.setVisible(false));
 
             searchBar.add(btnFindNext);
@@ -2456,7 +2559,7 @@ public class JarDecompiler {
             if (!result.modified) {
                 workbenchFrame.setStatus("No obfuscated patterns detected in " + currentPath.getFileName() + ".");
                 JOptionPane.showMessageDialog(this,
-                        "No obfuscated patterns (unicode escapes, opaque predicates, or synthetic variables)\nwere found in " + currentPath.getFileName() + ".",
+                        "No obfuscated patterns (non-ASCII identifiers, unicode escapes, opaque predicates, or synthetic variables)\nwere found in " + currentPath.getFileName() + ".",
                         "Deobfuscation Info", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }
@@ -2475,8 +2578,8 @@ public class JarDecompiler {
 
             checkDirty();
 
-            String summary = String.format("✨ Deobfuscated %s: Decoded %d unicode escapes, cleaned %d identifiers, folded %d predicates. (Press Ctrl+Z to undo)",
-                    currentPath.getFileName(), result.unicodeCount, result.identifiersRenamed, result.predicatesFolded);
+            String summary = String.format("✨ Deobfuscated %s: Cleaned %d non-ASCII names, decoded %d unicode escapes, beautified %d identifiers, folded %d predicates. (Press Ctrl+Z to undo)",
+                    currentPath.getFileName(), result.nonAsciiCleaned, result.unicodeCount, result.identifiersRenamed, result.predicatesFolded);
             workbenchFrame.setStatus(summary);
         }
 
