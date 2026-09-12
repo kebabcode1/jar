@@ -52,6 +52,24 @@ public class JarDecompiler {
     public static final Font FONT_UI_BOLD = new Font("Segoe UI", Font.BOLD, 13);
     public static final Font FONT_CODE = new Font("Consolas", Font.PLAIN, 13);
 
+    public static final String[] FALLBACK_FONT_NAMES = {
+        "Microsoft YaHei UI", "Microsoft YaHei", "SimSun", "Meiryo", "Malgun Gothic", "Arial Unicode MS", "SansSerif", "Dialog"
+    };
+
+    public static Font getFontForText(String text, Font baseFont) {
+        if (text == null || text.isEmpty()) return baseFont;
+        if (baseFont.canDisplayUpTo(text) == -1) {
+            return baseFont;
+        }
+        for (String fontName : FALLBACK_FONT_NAMES) {
+            Font candidate = new Font(fontName, baseFont.getStyle(), baseFont.getSize());
+            if (candidate.canDisplayUpTo(text) == -1) {
+                return candidate;
+            }
+        }
+        return new Font(Font.SANS_SERIF, baseFont.getStyle(), baseFont.getSize());
+    }
+
     public enum Engine {
         VINEFLOWER("Vineflower (IntelliJ IDEA Engine - Recommended)", "vineflower-" + VINEFLOWER_VERSION + ".jar", VINEFLOWER_URL),
         CFR("CFR (High Compatibility Decompiler)", "cfr-" + CFR_VERSION + ".jar", CFR_URL),
@@ -315,9 +333,9 @@ public class JarDecompiler {
                     }
                     res.classesCount = countGeneratedJavaFiles(options.outputDir);
                     if (options.deobfuscate) {
-                        logger.accept("Post-processing project files with source deobfuscator (cleaning non-ASCII names, beautifying synthetic variables, decoding unicode)...");
-                        int deobfCount = postProcessDeobfuscateDirectory(options.outputDir, logger);
-                        logger.accept("Deobfuscated and cleaned " + deobfCount + " source files.");
+                        logger.accept("Post-processing project files with source deobfuscator (renaming non-ASCII folders & files, beautifying synthetic variables, decoding unicode)...");
+                        int[] counts = postProcessDeobfuscateDirectory(options.outputDir, logger);
+                        logger.accept(String.format("Deobfuscation complete: %d files modified, %d files renamed, %d folders renamed.", counts[0], counts[1], counts[2]));
                     }
                     res.success = true;
                 }
@@ -575,25 +593,143 @@ public class JarDecompiler {
         return count;
     }
 
-    private static int postProcessDeobfuscateDirectory(Path dir, java.util.function.Consumer<String> logger) {
-        if (!Files.isDirectory(dir)) return 0;
-        int[] count = new int[]{0};
-        try (var stream = Files.walk(dir)) {
-            stream.filter(p -> Files.isRegularFile(p) && p.toString().endsWith(".java"))
-                  .forEach(p -> {
-                      try {
-                          String content = Files.readString(p, StandardCharsets.UTF_8);
-                          DeobfuscationService.DeobfuscateResult result = DeobfuscationService.deobfuscateSource(content);
-                          if (result.modified) {
-                              Files.writeString(p, result.transformedCode, StandardCharsets.UTF_8);
-                              count[0]++;
-                          }
-                      } catch (Exception ignored) {}
-                  });
+    public static int[] postProcessDeobfuscateDirectory(Path dir, java.util.function.Consumer<String> logger) {
+        if (!Files.isDirectory(dir)) return new int[]{0, 0, 0};
+        int filesModified = 0;
+        int filesRenamed = 0;
+        int dirsRenamed = 0;
+
+        try {
+            // 1. Scan all .java files to discover non-ASCII package names and class names
+            List<Path> javaFiles = new ArrayList<>();
+            try (var stream = Files.walk(dir)) {
+                stream.filter(p -> Files.isRegularFile(p) && p.toString().endsWith(".java"))
+                      .forEach(javaFiles::add);
+            }
+
+            Map<String, String> packageRenames = new LinkedHashMap<>();
+            Map<String, String> classRenames = new LinkedHashMap<>();
+            int obfClassIndex = 1;
+
+            // First pass: identify non-ASCII filenames and package declarations
+            for (Path p : javaFiles) {
+                String fileName = p.getFileName().toString();
+                String baseName = fileName.contains(".") ? fileName.substring(0, fileName.lastIndexOf('.')) : fileName;
+                if (DeobfuscationService.hasNonAscii(baseName) && !classRenames.containsKey(baseName)) {
+                    classRenames.put(baseName, "ObfClass_" + (obfClassIndex++));
+                }
+
+                try {
+                    String content = Files.readString(p, StandardCharsets.UTF_8);
+                    Pattern pkgPattern = Pattern.compile("(package\\s+)([^;]+)(;)");
+                    Matcher pkgMatcher = pkgPattern.matcher(content);
+                    if (pkgMatcher.find()) {
+                        String fullPkg = pkgMatcher.group(2).trim();
+                        if (DeobfuscationService.hasNonAscii(fullPkg) && !packageRenames.containsKey(fullPkg)) {
+                            String[] parts = fullPkg.split("\\.");
+                            StringBuilder newPkg = new StringBuilder();
+                            for (int i = 0; i < parts.length; i++) {
+                                if (i > 0) newPkg.append(".");
+                                if (DeobfuscationService.hasNonAscii(parts[i])) {
+                                    newPkg.append("pkg_").append(i + 1);
+                                } else {
+                                    newPkg.append(parts[i]);
+                                }
+                            }
+                            packageRenames.put(fullPkg, newPkg.toString());
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            // 2. Transform source code inside all .java files
+            for (Path p : javaFiles) {
+                try {
+                    String content = Files.readString(p, StandardCharsets.UTF_8);
+                    String orig = content;
+
+                    // Replace package declarations and imports
+                    for (Map.Entry<String, String> entry : packageRenames.entrySet()) {
+                        content = content.replace(entry.getKey(), entry.getValue());
+                    }
+
+                    // Replace class names
+                    for (Map.Entry<String, String> entry : classRenames.entrySet()) {
+                        content = content.replace(entry.getKey(), entry.getValue());
+                    }
+
+                    // Run full DeobfuscationService pipeline (unicode decode, synthetic params, predicates)
+                    DeobfuscationService.DeobfuscateResult subResult = DeobfuscationService.deobfuscateSource(content);
+                    if (subResult.modified || !content.equals(orig)) {
+                        Files.writeString(p, subResult.transformedCode, StandardCharsets.UTF_8);
+                        filesModified++;
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            // 3. Rename .java files on disk that have non-ASCII names
+            List<Path> filesToRename = new ArrayList<>();
+            try (var stream = Files.walk(dir)) {
+                stream.filter(p -> Files.isRegularFile(p) && p.toString().endsWith(".java"))
+                      .forEach(p -> {
+                          String baseName = p.getFileName().toString().replace(".java", "");
+                          if (DeobfuscationService.hasNonAscii(baseName)) filesToRename.add(p);
+                      });
+            }
+            for (Path p : filesToRename) {
+                String baseName = p.getFileName().toString().replace(".java", "");
+                String newName = classRenames.getOrDefault(baseName, "ObfClass_" + (obfClassIndex++)) + ".java";
+                Path target = p.resolveSibling(newName);
+                try {
+                    Files.move(p, target, StandardCopyOption.REPLACE_EXISTING);
+                    filesRenamed++;
+                } catch (Exception ignored) {}
+            }
+
+            // 4. Rename directories on disk (bottom-up so children are moved before parents)
+            List<Path> allDirs = new ArrayList<>();
+            try (var stream = Files.walk(dir)) {
+                stream.filter(Files::isDirectory).forEach(allDirs::add);
+            }
+            allDirs.sort((a, b) -> Integer.compare(b.getNameCount(), a.getNameCount()));
+
+            int dirIndex = 1;
+            for (Path subDir : allDirs) {
+                if (subDir.equals(dir)) continue;
+                String dirName = subDir.getFileName().toString();
+                if (DeobfuscationService.hasNonAscii(dirName)) {
+                    String newDirName = "pkg_" + (dirIndex++);
+                    for (Map.Entry<String, String> entry : packageRenames.entrySet()) {
+                        String[] origParts = entry.getKey().split("\\.");
+                        String[] newParts = entry.getValue().split("\\.");
+                        for (int i = 0; i < origParts.length; i++) {
+                            if (origParts[i].equals(dirName) && i < newParts.length) {
+                                newDirName = newParts[i];
+                                break;
+                            }
+                        }
+                    }
+                    Path targetDir = subDir.resolveSibling(newDirName);
+                    int cNum = 1;
+                    while (Files.exists(targetDir) && !targetDir.equals(subDir)) {
+                        targetDir = subDir.resolveSibling(newDirName + "_" + (cNum++));
+                    }
+                    try {
+                        Files.move(subDir, targetDir, StandardCopyOption.REPLACE_EXISTING);
+                        dirsRenamed++;
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            if (logger != null) {
+                logger.accept(String.format("Deobfuscation complete: %d files modified, %d files renamed, %d folders renamed.",
+                        filesModified, filesRenamed, dirsRenamed));
+            }
         } catch (Exception e) {
             if (logger != null) logger.accept("Post-processing notice: " + e.getMessage());
         }
-        return count[0];
+
+        return new int[]{filesModified, filesRenamed, dirsRenamed};
     }
 
     private static String getJavaExecutablePath() {
@@ -1121,7 +1257,7 @@ public class JarDecompiler {
             return new DeobfuscateResult(current, unicodeCount, identifiersRenamed, predicatesFolded, nonAsciiCleaned);
         }
 
-        private static boolean hasNonAscii(String str) {
+        public static boolean hasNonAscii(String str) {
             if (str == null) return false;
             for (int i = 0; i < str.length(); i++) {
                 if (str.charAt(i) > 127) return true;
@@ -1289,13 +1425,17 @@ public class JarDecompiler {
             itemCurrentFile.setFont(FONT_UI);
             itemCurrentFile.addActionListener(ev -> codeViewerPanel.deobfuscateActiveFile());
 
-            JMenuItem itemDeepProject = new JMenuItem("Deep Deobfuscate Project (Re-run Engine with Anti-Obfuscation flags)");
+            JMenuItem itemRenameDisk = new JMenuItem("Deobfuscate Project Folders & Files (Rename non-ASCII folders & files to clean ASCII)");
+            itemRenameDisk.setFont(FONT_UI);
+            itemRenameDisk.addActionListener(ev -> deobfuscateCurrentProjectDisk());
+
+            JMenuItem itemDeepProject = new JMenuItem("Deep Deobfuscate Project (Re-run Engine with Anti-Obfuscation flags & Clean Folders)");
             itemDeepProject.setFont(FONT_UI);
             itemDeepProject.addActionListener(ev -> {
                 if (currentJarPath != null) {
                     int confirm = JOptionPane.showConfirmDialog(
                             this,
-                            "Deep deobfuscation will re-run " + currentEngine.displayName + "\nwith aggressive anti-obfuscation, identifier renaming, and flow cleaning flags.\n\nProceed?",
+                            "Deep deobfuscation will re-run " + currentEngine.displayName + "\nwith aggressive anti-obfuscation, identifier renaming, and flow cleaning flags,\nand rename all obfuscated non-ASCII folders and files on disk.\n\nProceed?",
                             "Deep Deobfuscate Project",
                             JOptionPane.YES_NO_OPTION,
                             JOptionPane.QUESTION_MESSAGE
@@ -1307,6 +1447,7 @@ public class JarDecompiler {
             });
 
             deobfMenu.add(itemCurrentFile);
+            deobfMenu.add(itemRenameDisk);
             deobfMenu.addSeparator();
             deobfMenu.add(itemDeepProject);
 
@@ -1417,6 +1558,46 @@ public class JarDecompiler {
 
         public void setStatus(String text) {
             lblStatus.setText(text);
+        }
+
+        public void deobfuscateCurrentProjectDisk() {
+            if (currentOutputDir == null || !Files.isDirectory(currentOutputDir)) {
+                JOptionPane.showMessageDialog(this, "No project directory is currently loaded.", "Info", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+
+            setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+            setStatus("Deobfuscating project folders & files on disk...");
+
+            SwingWorker<int[], Void> worker = new SwingWorker<>() {
+                @Override
+                protected int[] doInBackground() {
+                    return postProcessDeobfuscateDirectory(currentOutputDir, line -> setStatus(line));
+                }
+
+                @Override
+                protected void done() {
+                    setCursor(Cursor.getDefaultCursor());
+                    try {
+                        int[] counts = get();
+                        String msg = String.format("✨ Deobfuscation complete:\n• Cleaned %d Java source files\n• Renamed %d obfuscated files\n• Renamed %d obfuscated folders",
+                                counts[0], counts[1], counts[2]);
+                        fileTreePanel.loadDirectory(currentOutputDir, currentJarPath != null ? currentJarPath.getFileName().toString() : currentOutputDir.getFileName().toString());
+
+                        Path firstJava = findFirstJavaFile(currentOutputDir);
+                        if (firstJava != null) {
+                            codeViewerPanel.loadFile(firstJava);
+                            fileTreePanel.selectPath(firstJava);
+                        }
+                        setStatus(String.format("Project Deobfuscated: %d files modified, %d files renamed, %d folders renamed.", counts[0], counts[1], counts[2]));
+                        JOptionPane.showMessageDialog(WorkbenchFrame.this, msg, "Deobfuscation Finished", JOptionPane.INFORMATION_MESSAGE);
+                    } catch (Exception ex) {
+                        setStatus("Deobfuscation error: " + ex.getMessage());
+                        JOptionPane.showMessageDialog(WorkbenchFrame.this, "Error during deobfuscation: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                    }
+                }
+            };
+            worker.execute();
         }
 
         public void loadAndDecompileJar(Path jarPath) {
@@ -2136,6 +2317,7 @@ public class JarDecompiler {
                     Object uo = node.getUserObject();
                     if (uo instanceof FileNodeItem item) {
                         lblName.setText(item.name);
+                        lblName.setFont(getFontForText(item.name, FONT_UI));
                         String nameLower = item.name.toLowerCase();
 
                         if (item.isDirectory) {
@@ -2581,6 +2763,16 @@ public class JarDecompiler {
             String summary = String.format("✨ Deobfuscated %s: Cleaned %d non-ASCII names, decoded %d unicode escapes, beautified %d identifiers, folded %d predicates. (Press Ctrl+Z to undo)",
                     currentPath.getFileName(), result.nonAsciiCleaned, result.unicodeCount, result.identifiersRenamed, result.predicatesFolded);
             workbenchFrame.setStatus(summary);
+
+            if (result.nonAsciiCleaned > 0 && currentPath != null && (DeobfuscationService.hasNonAscii(currentPath.getFileName().toString()) || (currentPath.getParent() != null && DeobfuscationService.hasNonAscii(currentPath.getParent().toString())))) {
+                int choice = JOptionPane.showConfirmDialog(this,
+                        "This file belongs to an obfuscated package or non-ASCII folder structure.\n" +
+                        "Would you like to deobfuscate and rename all obfuscated folders & files across the project on disk as well?",
+                        "Deobfuscate Project Folders?", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+                if (choice == JOptionPane.YES_OPTION) {
+                    workbenchFrame.deobfuscateCurrentProjectDisk();
+                }
+            }
         }
 
         private void runSearch() {
